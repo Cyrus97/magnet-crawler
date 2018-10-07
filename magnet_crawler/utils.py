@@ -1,3 +1,4 @@
+import logging
 import random
 import string
 from _socket import inet_ntoa
@@ -37,5 +38,15 @@ def parse_info_hash(data):
     return magnet
 
 
-if __name__ == '__main__':
-    print(get_random_id(4))
+def get_logger(name, level=logging.INFO):
+    logger = logging.getLogger(name)
+    logger.setLevel(level)
+    fh = logging.FileHandler('log.log', encoding='utf8')
+    ch = logging.StreamHandler()
+    formatter = logging.Formatter(fmt="[%(asctime)s %(levelname)s]  %(name)s  %(message)s", datefmt="%Y/%m/%d %X")
+    fh.setFormatter(formatter)
+    ch.setFormatter(formatter)
+    logger.addHandler(fh)
+    logger.addHandler(ch)
+
+    return logger

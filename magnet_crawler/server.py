@@ -1,39 +1,27 @@
-import logging
 import socket
 import time
 from bencoder import bdecode, bencode
 from collections import deque
+from multiprocessing import Process
+from os import cpu_count
+from threading import Thread
 
-from magnet_crawler.utils import get_random_id, parse_nodes, parse_info_hash
+from magnet_crawler.database import RedisClient
+from magnet_crawler.utils import get_random_id, parse_nodes, parse_info_hash, get_logger
 
 BOOTSTRAP_NODES = [
-    # "udp://tracker.open-internet.nl:6969/announce",
-    # "udp://tracker.coppersurfer.tk:6969/announce",
-    # "udp://exodus.desync.com:6969/announce",
-    # "udp://tracker.opentrackr.org:1337/announce",
-    # "udp://tracker.internetwarriors.net:1337/announce",
-    # "udp://9.rarbg.to:2710/announce",
-    # "udp://public.popcorn-tracker.org:6969/announce",
-    # "udp://tracker.vanitycore.co:6969/announce",
-    # "https://1.track.ga:443/announce",
-    # "udp://tracker.tiny-vps.com:6969/announce",
-    # "udp://tracker.cypherpunks.ru:6969/announce",
-    # "udp://thetracker.org:80/announce",
-    # "udp://tracker.torrent.eu.org:451/announce",
-    # "udp://retracker.lanta-net.ru:2710/announce",
-    # "udp://bt.xxx-tracker.com:2710/announce",
-    # "http://retracker.telecom.by:80/announce",
-    # "http://retracker.mgts.by:80/announce",
-    # "http://0d.kebhana.mx:443/announce",
-    # "udp://torr.ws:2710/announce",
-    # "udp://open.stealth.si:80/announce",
     ("router.bittorrent.com", 6881),
     ("dht.transmissionbt.com", 6881),
     ("router.utorrent.com", 6881),
 ]
 MAX_NODES_SIZE = 10000
 BUFSIZE = 10240
+SLEEP_TIME = 1e-3
 MAGNET_TEMPLATE = "magnet:?xt=urn:btih:{}"
+SERVER_HOST = '0.0.0.0'
+DEFAULT_SERVER_PORT = 10086
+DEFAULT_SERVER_NUM = cpu_count()
+TIMER_WAIT_TIME = 60
 
 
 class DHTNode:
@@ -44,7 +32,13 @@ class DHTNode:
 
 
 class DHTServer:
-    def __init__(self, bind_ip, bind_port):
+    def __init__(self, bind_ip, bind_port, name):
+        """
+
+        :param bind_ip: 绑定的ip
+        :param bind_port: 绑定的端口
+        :param name: 该server的名字
+        """
         # 自己也是一个node
         self.node = DHTNode(get_random_id(20), bind_ip, bind_port)
         # 使用udp
@@ -52,15 +46,37 @@ class DHTServer:
         self.udp_socket.bind((bind_ip, bind_port))
         # 存放发现的nodes
         self.nodes = deque(maxlen=MAX_NODES_SIZE)
-        self.magnets = []
+        self.magnets = set()
+        self.redis_client = RedisClient()
+        self.logger = get_logger(name)
+        self.logger.info("I'am {}, I'm bound at port:{}.".format(name, bind_port))
 
     def join_dht(self):
+        """从本地提供的节点加入 DHT 网络"""
         for addr in BOOTSTRAP_NODES:
             self.send_find_node_request(addr)
-            time.sleep(0.01)
+            time.sleep(SLEEP_TIME)
 
     def send_find_node_request(self, address, nid=None):
-        """发送 find_node 请求，以便收到更多的 DHT 节点"""
+        """
+        发送 find_node 请求，以便收到更多的 DHT 节点
+
+        对发送数据的说明
+        ===============
+
+        't': transaction ID, 由请求节点产生，长度不定，目的是定位当前信息的唯一性，1byte-->对应2^8个请求
+
+        'y': 'q', 代表当前是请求
+
+        'q': 'find_node', 请求方法(get_peers, announce_peer)
+
+        'a': {
+                'id': node_id, 请求节点的 id
+
+                'target': node_id, 正在查找的节点 id
+            }
+
+        """
         nid = nid if nid else self.node.nid
         tid = get_random_id(4)
         target = get_random_id(20)
@@ -77,14 +93,14 @@ class DHTServer:
 
     def send_krpc(self, data, address):
         """发送 krpc 信息"""
+        self.logger.debug("I'm sending to {}".format(address))
         try:
-            # print("I'm sending to {}".format(address))
             self.udp_socket.sendto(bencode(data), address)
         except Exception:
-            logging.exception(Exception)
+            self.logger.exception(Exception)
 
     def handle_receive_things(self, data, address):
-        """处理接收到的所以信息"""
+        """处理接收到的所有信息"""
         try:
             y = data.get(b'y')
             # 关键字 y = 'r', 表示当前是回复
@@ -102,11 +118,20 @@ class DHTServer:
                     if data.get(b'a'):
                         self.handle_announce_peer_request(data, address)
         except KeyError:
-            logging.exception(KeyError)
+            pass
+            # self.logger.exception(KeyError)
 
     def handle_find_node_response(self, data):
-        """处理 find_node 的回复"""
-        # print("I'm handling find_node_response")
+        """
+        处理 find_node 的回复
+
+        ‘r': {
+                'id': 发送方的 node id
+
+                'nodes': 离 target 最近的 k 个节点
+            }
+        """
+        self.logger.debug("I'm handling find_node_response")
         try:
             tid = data.get(b't')
             nid = data.get(b'r').get(b'id')
@@ -114,74 +139,114 @@ class DHTServer:
             nodes = parse_nodes(nodes)
             for node in nodes:
                 nid, ip, port = node
-                if len(nid) == 20:
+                if len(nid) == 20 and ip != SERVER_HOST:
                     self.nodes.append(DHTNode(nid, ip, port))
         except KeyError:
-            logging.exception(KeyError)
+            pass
+            # self.logger.exception(KeyError)
 
     def handle_get_peers_request(self, data, address):
-        """处理外部发来的 get_peers 请求，储存 infohash """
-        print("I'm handling get_peers_request")
-        print(data)
+        """
+        处理外部发来的 get_peers 请求，使用 info_hash 转为 magnet
+
+        'a': {
+                'id': node_id, 请求节点的 id
+
+                'info_hash': 请求的资源的 info_hash
+            }
+        """
+        self.logger.debug("I'm handling get_peers_request")
         try:
             tid = data.get(b't')
             nid = data.get(b'a').get(b'id')
             info_hash = data.get(b'a').get(b'info_hash')
-            print(info_hash)
             magnet = parse_info_hash(info_hash)
             # TODO: 储存 info_hash, 并回复
             self.save_magnet(magnet)
         except KeyError:
-            logging.exception(KeyError)
+            pass
+            # self.logger.exception(KeyError)
 
     def handle_announce_peer_request(self, data, address):
-        """处理外部发来的 announce_peer 请求， 储存 infohash """
-        print("I'm handling announce_peer_request")
+        """
+        处理外部发来的 announce_peer 请求，使用 info_hash 转为 magnet
+
+        'a': {
+                'id': node_id, 请求节点的 id
+
+                'info_hash': 请求的资源的 info_hash
+            }
+        """
+        self.logger.debug("I'm handling announce_peer_request")
         print(data)
         try:
             tid = data.get(b't')
             nid = data.get(b'a').get(b'id')
             info_hash = data.get(b'a').get(b'info_hash')
-            print(info_hash)
             magnet = parse_info_hash(info_hash)
             # TODO: 储存 info_hash, 并回复
             self.save_magnet(magnet)
         except KeyError:
-            logging.exception(KeyError)
+            pass
+            # self.logger.exception(KeyError)
 
     def receive_forever(self):
         """一直接收外部发来的信息"""
+        self.logger.info('start receive forever...')
         while True:
             try:
                 data, addr = self.udp_socket.recvfrom(BUFSIZE)
-                # print(threading.current_thread().name + "I'm received")
-                # print(bdecode(data))
                 self.handle_receive_things(bdecode(data), addr)
             except Exception:
-                logging.exception(Exception)
+                pass
+                # self.logger.exception(Exception)
 
     def send_forever(self):
-        """一直对外发送信息，即 find_node """
+        """一直对外发送信息，即发送 find_node"""
+        self.logger.info('start send forever...')
         while True:
             try:
                 node = self.nodes.popleft()
-                # print(threading.current_thread().name + 'send find_node request')
                 self.send_find_node_request((node.ip, node.port), node.nid)
-                time.sleep(0.01)
+                time.sleep(SLEEP_TIME)
             except IndexError:
                 self.join_dht()
 
     def save_magnet(self, magnet):
-        print(MAGNET_TEMPLATE.format(magnet))
-        self.magnets.append(MAGNET_TEMPLATE.format(magnet))
+        self.logger.info(MAGNET_TEMPLATE.format(magnet))
+        self.magnets.add(MAGNET_TEMPLATE.format(magnet))
+        self.redis_client.add(MAGNET_TEMPLATE.format(magnet))
 
-    def timer(self):
+    def reporter(self):
         """定时报告当前状况"""
-        t = 0
         while True:
-            if t % 60 == 0:
-                print('当前有{}个节点'.format(len(self.nodes)))
-                print('当前有{}个磁力链接'.format(len(self.magnets)))
-                t = 0
-            t = t + 1
-            time.sleep(1)
+            time.sleep(TIMER_WAIT_TIME)
+            self.join_dht()
+            self.logger.info('当前有{}个节点, 有{}个磁力链接'.format(len(self.nodes), len(self.magnets)))
+
+
+def start_server(index=0, bind_port=DEFAULT_SERVER_PORT):
+    dht_s = DHTServer(SERVER_HOST, bind_port, 'SERVER{}'.format(index))
+    threads = [
+        Thread(target=dht_s.send_forever),
+        Thread(target=dht_s.receive_forever),
+        Thread(target=dht_s.reporter)
+    ]
+
+    for t in threads:
+        t.start()
+
+    for t in threads:
+        t.join()
+
+
+def start_multi_server(num=DEFAULT_SERVER_NUM, origin_bind_port=DEFAULT_SERVER_PORT):
+    processes = []
+    for i in range(num):
+        processes.append(Process(target=start_server, args=(i, origin_bind_port + i,)))
+
+    for p in processes:
+        p.start()
+
+    for p in processes:
+        p.join()

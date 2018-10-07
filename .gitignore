@@ -1,1 +1,6 @@
+# ide
 .idea
+
+# log file
+*.log
+*/*.log
