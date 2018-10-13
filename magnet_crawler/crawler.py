@@ -16,11 +16,12 @@ BOOTSTRAP_NODES = [
 ]
 MAX_NODES_SIZE = 10000
 BUFSIZE = 10240
-SLEEP_TIME = 1e-3
+# 发送间隔时间
+SLEEP_TIME = 1e-6
 MAGNET_TEMPLATE = "magnet:?xt=urn:btih:{}"
 SERVER_HOST = '0.0.0.0'
 DEFAULT_SERVER_PORT = 10086
-DEFAULT_SERVER_NUM = cpu_count()
+DEFAULT_SERVER_COUNT = cpu_count()
 TIMER_WAIT_TIME = 60
 
 
@@ -240,13 +241,22 @@ def start_server(index=0, bind_port=DEFAULT_SERVER_PORT):
         t.join()
 
 
-def start_multi_server(num=DEFAULT_SERVER_NUM, origin_bind_port=DEFAULT_SERVER_PORT):
+def start_multi_server(count=DEFAULT_SERVER_COUNT, origin_bind_port=DEFAULT_SERVER_PORT):
+    # signal.signal(signal.SIGINT, handler)
+    # signal.signal(signal.SIGTERM, handler)
+
     processes = []
-    for i in range(num):
-        processes.append(Process(target=start_server, args=(i, origin_bind_port + i,)))
+    try:
+        for i in range(count):
+            p = Process(target=start_server, args=(i, origin_bind_port + i,))
+            p.start()
+            processes.append(p)
 
-    for p in processes:
-        p.start()
+        for p in processes:
+            p.join()
+    except KeyboardInterrupt:
+        print('退出')
 
-    for p in processes:
-        p.join()
+
+if __name__ == '__main__':
+    start_multi_server()

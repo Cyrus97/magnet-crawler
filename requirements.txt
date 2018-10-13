@@ -1,2 +1,3 @@
 redis==2.10.6
 bencoder.pyx==1.2.1
+websocket_client==0.53.0
