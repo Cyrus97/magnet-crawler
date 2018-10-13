@@ -23,12 +23,11 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='run for magnet-crawler')
 
     parser.add_argument("runserver", nargs='?', help='启动')
+    parser.add_argument("createdatabase", nargs='?', help='创建数据库', default='magnet.db')
+    parser.add_argument("-c", "--count", help="指定爬虫进程数", default=DEFAULT_SERVER_COUNT)
+    parser.add_argument("-p", "--port", type=int, help="指定爬虫绑定端口起始位置", default=DEFAULT_SERVER_PORT)
     parser.add_argument("--only-crawler", help="只运行爬虫", action="store_true", dest='crawler')
     parser.add_argument("--only-convert", help="只运行 magnet 转换", action="store_true", dest='convert')
-    parser.add_argument("-c", "--count", help="指定爬虫线程数", default=DEFAULT_SERVER_COUNT)
-    parser.add_argument("-p", "--port", type=int, help="指定爬虫绑定端口起始位置", default=DEFAULT_SERVER_PORT)
-    g = parser.add_argument_group('cre')
-    g.add_argument("createdatabase", nargs='?', help='创建数据库', default='magnet.db')
 
     args = parser.parse_args()
 
